@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebSocket Location Test</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    h2 { color: #444; }
+    ul { list-style-type: none; padding: 0; }
+    li { padding: 8px; border-bottom: 1px solid #ccc; }
+    .status { margin-bottom: 10px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h2>Real-time Location Log</h2>
+  <div class="status">Connecting to WebSocket...</div>
+  <ul id="locationList"></ul>
+
+ <script>
+  const statusEl = document.querySelector('.status');
+  const list = document.getElementById('locationList');
+
+  const socket = new WebSocket("ws://localhost:8000/ws/location");
+
+  socket.onopen = () => {
+    statusEl.textContent = "Connected to WebSocket!";
+    socket.send("frontend"); // Optional ping to keep alive
+  };
+
+  socket.onmessage = (event) => {
+    console.log("Message received from backend:", event.data);
+
+    try {
+      const data = JSON.parse(event.data);
+      const item = document.createElement('li');
+      item.textContent = `${data.device} | Lat: ${data.lat}, Lon: ${data.lon} | Speed: ${data.speed} | Time: ${data.timestamp}`;
+      list.prepend(item); // Show latest message on top
+    } catch (err) {
+      console.error("❌ Failed to parse message:", err);
+    }
+  };
+
+  socket.onerror = (error) => {
+    statusEl.textContent = "WebSocket error!";
+    console.error("WebSocket Error:", error);
+  };
+
+  socket.onclose = () => {
+    statusEl.textContent = "WebSocket disconnected";
+  };
+</script>
+
+</body>
+</html>
