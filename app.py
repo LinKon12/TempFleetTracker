@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from sqlalchemy import create_engine, Column, Integer, String, Float, Text, ForeignKey, DateTime, Interval, text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from geoalchemy2 import Geography
@@ -13,6 +13,9 @@ Base = declarative_base()
 DATABASE_URL = "postgresql+psycopg2://postgres:root@localhost:5432/FleetTracker"
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
+
+# --- WebSocket Connections Set ---
+active_websockets = set()
 
 # --- Database Models ---
 
@@ -110,8 +113,26 @@ def get_geofences():
     result = [{"name": z.name, "radius": z.radius} for z in zones]
     return result
 
-# --- MQTT Listener ---
+# --- WebSocket Endpoint ---
+@app.websocket("/ws/location")
+async def location_ws(websocket: WebSocket):
+    await websocket.accept()
+    active_websockets.add(websocket)
+    print(f"🧩 WebSocket connected. Total: {len(active_websockets)}")
+    try:
+        while True:
+            await websocket.receive_text()  # Keep alive
+    except WebSocketDisconnect:
+        active_websockets.remove(websocket)
+        print(f"❌ WebSocket disconnected. Remaining: {len(active_websockets)}")
 
+async def broadcast_location_to_websockets(data):
+    if not active_websockets:
+        return
+    message = json.dumps(data)
+    await asyncio.gather(*(ws.send_text(message) for ws in active_websockets))
+
+# --- MQTT Listener ---
 mqtt_client = MQTTClient("fleet-backend")
 
 @app.on_event("startup")
@@ -130,7 +151,7 @@ async def startup_event():
             device = data.get("tid", "unknown")
 
             if not all([lat, lon, timestamp]):
-                print("⚠️ Incomplete data")
+                print("Incomplete data")
                 return
 
             dt = datetime.fromtimestamp(timestamp)
@@ -156,7 +177,7 @@ async def startup_event():
                     truck = Truck(vin=device, driver_id=dummy_driver.driver_id)
                     db.add(truck)
                     db.commit()
-                    print(f"✅ Added new truck/driver for {device}")
+                    print(f"Added new truck/driver for {device}")
 
                 log = LocationLog(
                     truck_id=device,
@@ -168,7 +189,17 @@ async def startup_event():
                 )
                 db.add(log)
                 db.commit()
-                print(f"Logged location for {device} at {dt}")
+                print(f"✅ Logged location for {device} at {dt}")
+
+                # 🛰 Broadcast to WebSocket clients
+                await broadcast_location_to_websockets({
+                    "device": device,
+                    "lat": lat,
+                    "lon": lon,
+                    "timestamp": dt.isoformat(),
+                    "speed": data.get("vel", 0.0)
+                })
+
             finally:
                 db.close()
 
