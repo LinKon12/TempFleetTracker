@@ -1,53 +1,39 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>WebSocket Location Test</title>
+  <title>Live GPS Tracker</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 20px; }
-    h2 { color: #444; }
-    ul { list-style-type: none; padding: 0; }
-    li { padding: 8px; border-bottom: 1px solid #ccc; }
-    .status { margin-bottom: 10px; font-weight: bold; }
+    body { font-family: monospace; background: #111; color: #0f0; padding: 20px; }
+    pre { white-space: pre-wrap; word-wrap: break-word; }
   </style>
 </head>
 <body>
-  <h2>Real-time Location Log</h2>
-  <div class="status">Connecting to WebSocket...</div>
-  <ul id="locationList"></ul>
+  <h2>📍 Live Truck Location Feed</h2>
+  <pre id="output">Connecting...</pre>
 
- <script>
-  const statusEl = document.querySelector('.status');
-  const list = document.getElementById('locationList');
+  <script>
+    const ws = new WebSocket("ws://localhost:8000/ws/location");
+    const out = document.getElementById("output");
 
-  const socket = new WebSocket("ws://localhost:8000/ws/location");
+    ws.onopen = () => {
+      out.textContent = "✅ WebSocket connected!\n\n";
+    };
 
-  socket.onopen = () => {
-    statusEl.textContent = "Connected to WebSocket!";
-    socket.send("frontend"); // Optional ping to keep alive
-  };
-
-  socket.onmessage = (event) => {
-    console.log("Message received from backend:", event.data);
-
-    try {
+    ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      const item = document.createElement('li');
-      item.textContent = `${data.device} | Lat: ${data.lat}, Lon: ${data.lon} | Speed: ${data.speed} | Time: ${data.timestamp}`;
-      list.prepend(item); // Show latest message on top
-    } catch (err) {
-      console.error("❌ Failed to parse message:", err);
-    }
-  };
+      const { device, lat, lon, timestamp, speed } = data;
 
-  socket.onerror = (error) => {
-    statusEl.textContent = "WebSocket error!";
-    console.error("WebSocket Error:", error);
-  };
+      const logEntry = `📡 Truck: ${device}\n🕒 Time: ${timestamp}\n📌 Lat: ${lat}, Lon: ${lon}\n🚚 Speed: ${speed} km/h\n-------------------------\n`;
 
-  socket.onclose = () => {
-    statusEl.textContent = "WebSocket disconnected";
-  };
-</script>
+      out.textContent += logEntry;
 
+      // Optional: scroll to bottom
+      out.scrollTop = out.scrollHeight;
+    };
+
+    ws.onclose = () => {
+      out.textContent += "\n❌ WebSocket closed";
+    };
+  </script>
 </body>
 </html>

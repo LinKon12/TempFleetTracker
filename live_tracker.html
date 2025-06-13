@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Live Trip Tracker</title>
+  <meta charset="utf-8" />
+  <style>
+    #map { height: 500px; }
+    button { margin: 10px; }
+  </style>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+</head>
+<body>
+  <h2>🚚 Live Trip Tracker</h2>
+  <button onclick="startTrip()">Start Trip</button>
+  <button onclick="endTrip()">End Trip</button>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    let map = L.map('map').setView([28.6139, 77.2090], 13); // Default to Delhi
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: 'Map data © OpenStreetMap contributors'
+    }).addTo(map);
+
+    let marker = null;
+    let path = [];
+    let polyline = L.polyline(path, { color: 'blue' }).addTo(map);
+    let tripId = null;
+
+    const ws = new WebSocket("ws://localhost:8000/ws/location");
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      const { lat, lon, device, timestamp } = data;
+
+      if (!tripId) return; // Only track when trip is active
+
+      const coord = [lat, lon];
+      if (!marker) {
+        marker = L.marker(coord).addTo(map);
+      } else {
+        marker.setLatLng(coord);
+      }
+
+      path.push(coord);
+      polyline.setLatLngs(path);
+      map.setView(coord);
+    };
+
+    async function startTrip() {
+      const res = await fetch("http://localhost:8000/trip/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vin: "l2" })  // Change to your actual device ID
+      });
+      const data = await res.json();
+      tripId = data.trip_id;
+      path = [];
+      polyline.setLatLngs([]);
+      alert("Trip started!");
+    }
+
+    async function endTrip() {
+      if (!tripId) return;
+      await fetch("http://localhost:8000/trip/end", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trip_id: tripId })
+      });
+      tripId = null;
+      alert("Trip ended!");
+    }
+  </script>
+</body>
+</html>
