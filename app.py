@@ -1,14 +1,20 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import asyncio, json
-from gmqtt import Client as MQTTClient
+import paho.mqtt.client as mqtt
 from fastapi.middleware.cors import CORSMiddleware
-
-from models import Base, Truck, Driver, LocationLog  
-from database import engine, SessionLocal             
+import openrouteservice
+from models import Trip, LocationLog
+from trip_routes import router as trip_router
+from models import Truck, Driver, LocationLog
+from database import SessionLocal
+from websocket_utils import active_websockets, broadcast_location_sync 
+ORS = openrouteservice.Client(key="5b3ce3597851110001cf6248e1d8e314ca754bc68acfb5b1aaa27ca5")
 
 app = FastAPI()
+
+app.include_router(trip_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,13 +23,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from trip_routes import router as trip_router
-app.include_router(trip_router)
-
-# --- WebSocket Set ---
-active_websockets = set()
-
-# --- WebSocket endpoint ---
 @app.websocket("/ws/location")
 async def location_ws(websocket: WebSocket):
     await websocket.accept()
@@ -36,42 +35,44 @@ async def location_ws(websocket: WebSocket):
         active_websockets.remove(websocket)
         print(f"❌ WebSocket disconnected. Remaining: {len(active_websockets)}")
 
-async def broadcast_location(data):
-    if not active_websockets:
-        return
-    msg = json.dumps(data)
-    await asyncio.gather(*(ws.send_text(msg) for ws in active_websockets))
+# MQTT Setup
+MQTT_BROKER = "broker.mqttdashboard.com"
+MQTT_PORT = 1883
+MQTT_TOPIC = "owntracks/lincolnrao/lincolnord"
 
-# --- MQTT Setup ---
-mqtt_client = MQTTClient("fleet-backend")
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Connected to MQTT Broker")
+        client.subscribe(MQTT_TOPIC)
+        print(f"Subscribed to topic: {MQTT_TOPIC}")
+    else:
+        print(f"Failed to connect, return code {rc}")
 
-@app.on_event("startup")
-async def startup_event():
-    async def on_message(client, topic, payload, qos, properties):
-        db = None  # Declare here to avoid UnboundLocalError in except/finally
-        try:
-            data = json.loads(payload.decode())
-            print("📦 MQTT data received:", data)
+def on_message(client, userdata, msg):
+    print(f"\nMessage received on topic {msg.topic}")
+    db = None
+    try:
+        payload = json.loads(msg.payload.decode())
+        print("MQTT data received:", payload)
 
-            if data.get("_type") != "location":
-                return
+        if payload.get("_type") != "location":
+            print("⚠️ Skipping non-location message:", payload)
+            return
 
-            lat = data.get("lat")
-            lon = data.get("lon")
-            timestamp = data.get("tst")
-            device = data.get("tid", "unknown")
+        lat = payload.get("lat")
+        lon = payload.get("lon")
+        timestamp = payload.get("tst")
+        device = payload.get("tid", "unknown")
+
+        if lat and lon and timestamp:
             dt = datetime.fromtimestamp(timestamp)
+            print(f"Device: {device}, Lat: {lat}, Lon: {lon}, Time: {dt}")
 
             db = SessionLocal()
 
-            # Check if truck exists
             truck = db.query(Truck).filter_by(vin=device).first()
             if not truck:
-                dummy_driver = Driver(
-                    name="OwnTracks",
-                    license_number="OWN123",
-                    contact="0000000000"
-                )
+                dummy_driver = Driver(name="OwnTracks", license_number="OWN123", contact="0000000000")
                 db.add(dummy_driver)
                 db.commit()
                 db.refresh(dummy_driver)
@@ -79,43 +80,62 @@ async def startup_event():
                 truck = Truck(vin=device, driver_id=dummy_driver.driver_id)
                 db.add(truck)
                 db.commit()
-                print(f"🆕 Registered new truck: {device}")
+                print(f"🚚 Registered new truck: {device}")
 
-            # Add location log
+            active_trip = db.query(Trip).filter_by(vin=device, status="active").first()
+            active_trip_id = active_trip.trip_id if active_trip else None
+
             log = LocationLog(
                 vin=device,
-                trip_id=None,
+                trip_id=active_trip_id,
                 timestamp=dt,
                 latitude=lat,
                 longitude=lon,
-                speed=data.get("vel", 0.0)
+                speed=payload.get("vel", 0.0)
             )
             db.add(log)
             db.commit()
-            print(f"✅ Location logged for {device} at {dt}")
+            print(f"📍 Location logged for {device} at {dt} [Trip ID: {active_trip_id}]")
 
-            # Send to WebSocket clients
-            await broadcast_location({
+            websocket_data = {
                 "device": device,
                 "lat": lat,
                 "lon": lon,
                 "timestamp": dt.isoformat(),
-                "speed": data.get("vel", 0.0)
-            })
+                "speed": payload.get("vel", 0.0)
+            }
+            broadcast_location_sync(websocket_data)
 
-        except Exception as e:
-            if db:
-                db.rollback()
-            print("❌ MQTT Handler Error:", e)
-        finally:
-            if db:
-                db.close()
+        else:
+            print("⚠️ Incomplete payload:", payload)
 
-    mqtt_client.on_message = on_message
-    await mqtt_client.connect("broker.mqttdashboard.com")
-    mqtt_client.subscribe("owntracks/lincolnrao/lincolnord")
+    except json.JSONDecodeError:
+        print("❌ Failed to decode JSON")
+    except Exception as e:
+        if db:
+            db.rollback()
+        print("💥 MQTT Handler Error:", e)
+    finally:
+        if db:
+            db.close()
 
-# --- Run ---
+mqtt_client = mqtt.Client()
+mqtt_client.on_connect = on_connect
+mqtt_client.on_message = on_message
+
+@app.on_event("startup")
+async def startup_event():
+    import websocket_utils  # make sure you import this at the top
+    websocket_utils.main_loop = asyncio.get_running_loop()  # ✅ correctly share loop
+    print("Starting MQTT client...")
+    mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+    mqtt_client.loop_start()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    mqtt_client.loop_stop()
+    mqtt_client.disconnect()
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)

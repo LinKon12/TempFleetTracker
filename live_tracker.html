@@ -6,14 +6,27 @@
   <style>
     #map { height: 500px; }
     button { margin: 10px; }
+    #trip-summary {
+      margin-top: 15px;
+      font-weight: normal;
+      background-color: #f0f0f0;
+      padding: 15px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      max-width: 500px;
+    }
+    #trip-summary h3 {
+      margin-top: 0;
+    }
   </style>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
 </head>
 <body>
-  <h2>🚚 Live Trip Tracker</h2>
+  <h2>Live Trip Tracker</h2>
   <button onclick="startTrip()">Start Trip</button>
   <button onclick="endTrip()">End Trip</button>
   <div id="map"></div>
+  <div id="trip-summary"></div>
 
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
   <script>
@@ -30,9 +43,9 @@
     const ws = new WebSocket("ws://localhost:8000/ws/location");
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      const { lat, lon, device, timestamp } = data;
+      const { lat, lon } = data;
 
-      if (!tripId) return; // Only track when trip is active
+      if (!tripId) return;
 
       const coord = [lat, lon];
       if (!marker) {
@@ -50,24 +63,52 @@
       const res = await fetch("http://localhost:8000/trip/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ vin: "l2" })  // Change to your actual device ID
+        body: JSON.stringify({ vin: "l2" })
       });
       const data = await res.json();
       tripId = data.trip_id;
       path = [];
       polyline.setLatLngs([]);
-      alert("Trip started!");
+      document.getElementById("trip-summary").innerText = "Trip started!";
     }
 
     async function endTrip() {
       if (!tripId) return;
-      await fetch("http://localhost:8000/trip/end", {
+      const res = await fetch("http://localhost:8000/trip/end", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ trip_id: tripId })
       });
+      const data = await res.json();
       tripId = null;
-      alert("Trip ended!");
+
+      const summaryDiv = document.getElementById("trip-summary");
+
+      if (data.total_distance_km !== undefined) {
+        summaryDiv.innerHTML = `
+          <h3>Trip Summary</h3>
+          <ul>
+            <li><strong>Start Time:</strong> ${new Date(data.start_time).toLocaleString()}</li>
+            <li><strong>End Time:</strong> ${new Date(data.end_time).toLocaleString()}</li>
+            <li><strong>Duration:</strong> ${data.duration_minutes} minutes</li>
+            <li><strong>Start Location:</strong> (${data.start_lat}, ${data.start_lon})</li>
+            <li><strong>End Location:</strong> (${data.end_lat}, ${data.end_lon})</li>
+            <li><strong>Total Distance:</strong> ${data.total_distance_km.toFixed(2)} km</li>
+          </ul>
+        `;
+
+        // Add red marker at end location
+        L.marker([data.end_lat, data.end_lon], {
+          title: "Trip End",
+          icon: L.icon({
+            iconUrl: 'https://maps.google.com/mapfiles/ms/icons/red-dot.png',
+            iconSize: [32, 32],
+            iconAnchor: [16, 32],
+          })
+        }).addTo(map);
+      } else {
+        summaryDiv.innerText = "Trip ended (but summary unavailable).";
+      }
     }
   </script>
 </body>
