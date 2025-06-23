@@ -6,7 +6,7 @@ from geoalchemy2.shape import to_shape
 from shapely.geometry import Point
 from datetime import datetime, timezone
 import openrouteservice
-from models import TripPlan, Trip,Truck, Driver,TruckStats
+from models import TripPlan, Trip,Truck, Driver,TruckStats, TripComparison
 from fastapi import Depends, HTTPException
 from database import get_db
 from models import Trip, LocationLog
@@ -126,7 +126,7 @@ async def end_trip(request: Request):
         duration = None
         if trip.start_time and trip.end_time:
             duration = trip.end_time - trip.start_time
-            duration_minutes = duration.total_seconds() / 60  # ✅ now float
+            duration_minutes = duration.total_seconds() / 60  # now float
 
         comparison = None
         actual_avg_speed = 0
@@ -143,6 +143,28 @@ async def end_trip(request: Request):
                     "expected_avg_speed": plan.expected_avg_speed,
                     "actual_avg_speed": round(actual_avg_speed, 1)
                 }
+        if comparison:
+            existing = db.query(TripComparison).filter_by(trip_id=trip.trip_id).first()
+            if existing:
+                # Update if already exists
+                existing.expected_distance_km = comparison["expected_distance_km"]
+                existing.actual_distance_km = comparison["actual_distance_km"]
+                existing.expected_time_minutes = comparison["expected_time_minutes"]
+                existing.actual_time_minutes = comparison["actual_time_minutes"]
+                existing.expected_avg_speed = comparison["expected_avg_speed"]
+                existing.actual_avg_speed = comparison["actual_avg_speed"]
+            else:
+        # Create new record
+                comp = TripComparison(
+                    trip_id=trip.trip_id,
+                    expected_distance_km=comparison["expected_distance_km"],
+                    actual_distance_km=comparison["actual_distance_km"],
+                    expected_time_minutes=comparison["expected_time_minutes"],
+                    actual_time_minutes=comparison["actual_time_minutes"],
+                    expected_avg_speed=comparison["expected_avg_speed"],
+                    actual_avg_speed=comparison["actual_avg_speed"],
+                )
+                db.add(comp)
 
         # ✅ UPDATE STATS
         if duration_minutes:
@@ -340,6 +362,7 @@ def register_driver(driver: DriverCreate, db: Session = Depends(get_db)):
         "name": new_driver.name,
         "phone": new_driver.phone
     })
+    # meri mummy pagal hai
 
     return {"driver_id": new_driver.driver_id, "message": "Driver registered successfully"}
 
@@ -356,4 +379,47 @@ def get_truck_stats(vin: str, db: Session = Depends(get_db)):
         "average_distance_per_trip_km": stats.average_distance_per_trip_km,
         "average_speed_kmph": stats.average_speed_kmph,
         "last_updated": stats.last_updated,
+    }
+
+@router.get("/dri ver/analytics/{driver_id}")
+def driver_analytics(driver_id: int, db: Session = Depends(get_db)):
+    trips = (
+        db.query(Trip, TripComparison)
+        .join(Truck, Trip.vin == Truck.vin)
+        .join(Driver, Truck.driver_id == Driver.driver_id)
+        .join(TripComparison, Trip.trip_id == TripComparison.trip_id)
+        .filter(Driver.driver_id == driver_id)
+        .all()
+    )
+
+    if not trips:
+        raise HTTPException(status_code=404, detail="No trips found for this driver")
+
+    total_trips = len(trips)
+    total_distance = sum(comp.actual_distance_km for trip, comp in trips)
+    total_duration = sum(comp.actual_time_minutes for trip, comp in trips)
+    avg_speed = round(total_distance / (total_duration / 60), 2) if total_duration else 0
+
+    tripwise_summary = []
+    for trip, comp in trips:
+        efficiency = (
+            round((comp.expected_time_minutes / comp.actual_time_minutes) * 100, 2)
+            if comp.actual_time_minutes else 0
+        )
+        tripwise_summary.append({
+            "trip_id": trip.trip_id,
+            "expected_time": comp.expected_time_minutes,
+            "actual_time": comp.actual_time_minutes,
+            "expected_speed": comp.expected_avg_speed,
+            "actual_speed": comp.actual_avg_speed,
+            "efficiency_percent": efficiency
+        })
+
+    return {
+        "driver_id": driver_id,
+        "total_trips": total_trips,
+        "total_distance_km": round(total_distance, 2),
+        "total_duration_minutes": round(total_duration, 1),
+        "average_speed_kmph": avg_speed,
+        "tripwise_summary": tripwise_summary
     }
