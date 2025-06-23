@@ -79,17 +79,11 @@ async def end_trip(request: Request):
         if not trip:
             return {"error": "Trip not found or already ended."}
 
-        trip_logs = db.query(LocationLog) \
-            .filter_by(trip_id=trip_id) \
-            .order_by(LocationLog.timestamp.asc()) \
-            .all()
-
+        trip_logs = db.query(LocationLog).filter_by(trip_id=trip_id).order_by(LocationLog.timestamp.asc()).all()
         if not trip_logs:
             return {"error": "No location logs found for this trip."}
 
-        first_log = trip_logs[0]
-        last_log = trip_logs[-1]
-
+        first_log, last_log = trip_logs[0], trip_logs[-1]
         lat1, lon1 = first_log.latitude, first_log.longitude
         lat2, lon2 = last_log.latitude, last_log.longitude
 
@@ -97,76 +91,73 @@ async def end_trip(request: Request):
         destination_point = from_shape(Point(lon2, lat2), srid=4326)
 
         from math import radians, cos, sin, sqrt, atan2
-
         def haversine(lat1, lon1, lat2, lon2):
             R = 6371
             dlat = radians(lat2 - lat1)
             dlon = radians(lon2 - lon1)
-            a = sin(dlat / 2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2)**2
+            a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
             c = 2 * atan2(sqrt(a), sqrt(1 - a))
             return R * c
 
-        actual_distance_km = 0
-        for i in range(1, len(trip_logs)):
-            p1 = trip_logs[i - 1]
-            p2 = trip_logs[i]
-            actual_distance_km += haversine(p1.latitude, p1.longitude, p2.latitude, p2.longitude)
+        actual_distance_km = sum(
+            haversine(trip_logs[i - 1].latitude, trip_logs[i - 1].longitude, trip_logs[i].latitude, trip_logs[i].longitude)
+            for i in range(1, len(trip_logs))
+        )
 
-        trip.start_lat = lat1
-        trip.start_lon = lon1
-        trip.end_lat = lat2
-        trip.end_lon = lon2
-        trip.origin = origin_point
-        trip.destination = destination_point
+        trip.start_lat, trip.start_lon = lat1, lon1
+        trip.end_lat, trip.end_lon = lat2, lon2
+        trip.origin, trip.destination = origin_point, destination_point
         trip.end_time = datetime.now(timezone.utc)
         trip.status = "completed"
         trip.distance_km = round(actual_distance_km, 2)
 
         duration_minutes = None
-        duration = None
         if trip.start_time and trip.end_time:
             duration = trip.end_time - trip.start_time
-            duration_minutes = duration.total_seconds() / 60  # now float
+            duration_minutes = duration.total_seconds() / 60
 
         comparison = None
+        efficiency = None
         actual_avg_speed = 0
 
         if trip.plan_id:
             plan = db.query(TripPlan).filter_by(plan_id=trip.plan_id).first()
             if plan and duration_minutes:
                 actual_avg_speed = actual_distance_km / (duration_minutes / 60)
+                efficiency = round((plan.expected_time_minutes / duration_minutes) * 100, 2) if duration_minutes else 0
                 comparison = {
                     "expected_distance_km": plan.expected_distance_km,
                     "actual_distance_km": round(actual_distance_km, 2),
                     "expected_time_minutes": plan.expected_time_minutes,
                     "actual_time_minutes": duration_minutes,
                     "expected_avg_speed": plan.expected_avg_speed,
-                    "actual_avg_speed": round(actual_avg_speed, 1)
+                    "actual_avg_speed": round(actual_avg_speed, 1),
+                    "efficiency_percent": efficiency
                 }
-        if comparison:
-            existing = db.query(TripComparison).filter_by(trip_id=trip.trip_id).first()
-            if existing:
-                # Update if already exists
-                existing.expected_distance_km = comparison["expected_distance_km"]
-                existing.actual_distance_km = comparison["actual_distance_km"]
-                existing.expected_time_minutes = comparison["expected_time_minutes"]
-                existing.actual_time_minutes = comparison["actual_time_minutes"]
-                existing.expected_avg_speed = comparison["expected_avg_speed"]
-                existing.actual_avg_speed = comparison["actual_avg_speed"]
-            else:
-        # Create new record
-                comp = TripComparison(
-                    trip_id=trip.trip_id,
-                    expected_distance_km=comparison["expected_distance_km"],
-                    actual_distance_km=comparison["actual_distance_km"],
-                    expected_time_minutes=comparison["expected_time_minutes"],
-                    actual_time_minutes=comparison["actual_time_minutes"],
-                    expected_avg_speed=comparison["expected_avg_speed"],
-                    actual_avg_speed=comparison["actual_avg_speed"],
-                )
-                db.add(comp)
 
-        # ✅ UPDATE STATS
+                existing = db.query(TripComparison).filter_by(trip_id=trip.trip_id).first()
+                if existing:
+                    existing.expected_distance_km = comparison["expected_distance_km"]
+                    existing.actual_distance_km = comparison["actual_distance_km"]
+                    existing.expected_time_minutes = comparison["expected_time_minutes"]
+                    existing.actual_time_minutes = comparison["actual_time_minutes"]
+                    existing.expected_avg_speed = comparison["expected_avg_speed"]
+                    existing.actual_avg_speed = comparison["actual_avg_speed"]
+                    existing.efficiency_percent = efficiency
+                else:
+                    comp = TripComparison(
+                        trip_id=trip.trip_id,
+                        expected_distance_km=comparison["expected_distance_km"],
+                        actual_distance_km=comparison["actual_distance_km"],
+                        expected_time_minutes=comparison["expected_time_minutes"],
+                        actual_time_minutes=comparison["actual_time_minutes"],
+                        expected_avg_speed=comparison["expected_avg_speed"],
+                        actual_avg_speed=comparison["actual_avg_speed"],
+                        efficiency_percent=efficiency
+                    )
+                    db.add(comp)
+
+        # ✅ Update truck stats
         if duration_minutes:
             stats = db.query(TruckStats).filter(TruckStats.vin == trip.vin).first()
             if not stats:
@@ -185,13 +176,11 @@ async def end_trip(request: Request):
                 stats.total_distance_km += actual_distance_km
                 stats.total_duration_minutes += duration_minutes
                 stats.average_distance_per_trip_km = stats.total_distance_km / stats.total_trips
-                stats.average_speed_kmph = (
-                    stats.total_distance_km / (stats.total_duration_minutes / 60)
-                    if stats.total_duration_minutes > 0 else 0
-                )
+                stats.average_speed_kmph = stats.total_distance_km / (stats.total_duration_minutes / 60) if stats.total_duration_minutes > 0 else 0
                 stats.last_updated = datetime.utcnow()
 
         db.commit()
+
         broadcast_location_sync({
             "type": "trip_ended",
             "vin": trip.vin,
@@ -362,7 +351,6 @@ def register_driver(driver: DriverCreate, db: Session = Depends(get_db)):
         "name": new_driver.name,
         "phone": new_driver.phone
     })
-    # meri mummy pagal hai
 
     return {"driver_id": new_driver.driver_id, "message": "Driver registered successfully"}
 
@@ -381,7 +369,7 @@ def get_truck_stats(vin: str, db: Session = Depends(get_db)):
         "last_updated": stats.last_updated,
     }
 
-@router.get("/dri ver/analytics/{driver_id}")
+@router.get("/driver/analytics/{driver_id}")
 def driver_analytics(driver_id: int, db: Session = Depends(get_db)):
     trips = (
         db.query(Trip, TripComparison)
@@ -406,6 +394,7 @@ def driver_analytics(driver_id: int, db: Session = Depends(get_db)):
             round((comp.expected_time_minutes / comp.actual_time_minutes) * 100, 2)
             if comp.actual_time_minutes else 0
         )
+
         tripwise_summary.append({
             "trip_id": trip.trip_id,
             "expected_time": comp.expected_time_minutes,
@@ -423,3 +412,30 @@ def driver_analytics(driver_id: int, db: Session = Depends(get_db)):
         "average_speed_kmph": avg_speed,
         "tripwise_summary": tripwise_summary
     }
+
+@router.get("/driver/efficiency/leaderboard")
+def driver_efficiency_leaderboard(db: Session = Depends(get_db)):
+    results = (
+        db.query(
+            Driver.driver_id,
+            Driver.name,
+            func.avg(TripComparison.efficiency_percent).label("avg_efficiency")
+        )
+        .join(Truck, Truck.driver_id == Driver.driver_id)
+        .join(Trip, Trip.vin == Truck.vin)
+        .join(TripComparison, Trip.trip_id == TripComparison.trip_id)
+        .group_by(Driver.driver_id, Driver.name)
+        .order_by(func.avg(TripComparison.efficiency_percent).desc())
+        .all()
+    )
+
+    leaderboard = []
+    for rank, r in enumerate(results, start=1):
+        leaderboard.append({
+            "rank": rank,
+            "driver_id": r.driver_id,
+            "name": r.name,
+            "average_efficiency_percent": round(r.avg_efficiency, 2)
+        })
+
+    return leaderboard

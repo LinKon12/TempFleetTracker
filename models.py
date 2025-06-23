@@ -59,7 +59,8 @@ class Trip(Base):
     start_lon = Column(Float)
     end_lat = Column(Float)
     end_lon = Column(Float)
-
+    comparison = relationship("TripComparison", back_populates="trip", uselist=False)
+    
     
 class TripPlan(Base):
     __tablename__ = "trip_plan"
@@ -82,3 +83,17 @@ class TruckStats(Base):
     average_distance_per_trip_km = Column(Float, default=0)
     average_speed_kmph = Column(Float, default=0)
     last_updated = Column(DateTime, server_default=text('now()'))
+
+class TripComparison(Base):
+    __tablename__ = "trip_comparison"
+
+    trip_id = Column(Integer, ForeignKey("trip.trip_id", ondelete="CASCADE"), primary_key=True)
+    expected_distance_km = Column(Float)    
+    actual_distance_km = Column(Float)
+    expected_time_minutes = Column(Float)
+    actual_time_minutes = Column(Float)
+    expected_avg_speed = Column(Float)
+    actual_avg_speed = Column(Float)
+    efficiency_percent = Column(Float)
+
+    trip = relationship("Trip", back_populates="comparison")
