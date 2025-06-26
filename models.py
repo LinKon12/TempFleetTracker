@@ -1,11 +1,11 @@
-# models.py
-from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, DateTime,text
+from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, DateTime,text,Interval
 from sqlalchemy.orm import relationship
 from geoalchemy2 import Geography
-from database import Base
+from app.database import Base
 from datetime import datetime
 from pydantic import BaseModel
-
+import enum
+from sqlalchemy import Enum as PgEnum
 
 class Truck(Base):
     __tablename__ = "truck"
@@ -15,6 +15,8 @@ class Truck(Base):
     plate_number = Column(String)
     driver_id = Column(Integer, ForeignKey("driver.driver_id"))
     created_at = Column(DateTime, server_default=text("now()"))
+    fuel_efficiency_kmpl = Column(Float)
+
 
 class Driver(Base):
     __tablename__ = "driver"
@@ -59,6 +61,7 @@ class Trip(Base):
     start_lon = Column(Float)
     end_lat = Column(Float)
     end_lon = Column(Float)
+    fuel_consumed_litres = Column(Float)
     comparison = relationship("TripComparison", back_populates="trip", uselist=False)
     
     
@@ -97,3 +100,25 @@ class TripComparison(Base):
     efficiency_percent = Column(Float)
 
     trip = relationship("Trip", back_populates="comparison")
+
+class StopEventType(enum.Enum):
+    REFUEL = "refuel"
+    MAINTENANCE = "maintenance"
+    LOADING = "loading"
+    UNLOADING = "unloading"
+    BREAK = "break"
+    OTHERS = "others"
+
+
+class StopEvent(Base):
+    __tablename__ = "stop_event"
+
+    stop_id = Column(Integer, primary_key=True, index=True)
+    trip_id = Column(Integer, ForeignKey("trip.trip_id"))
+    vin = Column(String, ForeignKey("truck.vin"))
+    start_time = Column(DateTime(timezone=True))
+    end_time = Column(DateTime(timezone=True), nullable=True)
+    location = Column(Geography(geometry_type='POINT', srid=4326))
+    duration = Column(Interval, nullable=True)
+    event_type = Column(PgEnum(StopEventType, values_callable=lambda obj: [e.value for e in obj]), nullable=False)
+    reason = Column(String, nullable=True)

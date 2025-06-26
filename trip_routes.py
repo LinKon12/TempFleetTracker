@@ -6,14 +6,14 @@ from geoalchemy2.shape import to_shape
 from shapely.geometry import Point
 from datetime import datetime, timezone
 import openrouteservice
-from models import TripPlan, Trip,Truck, Driver,TruckStats, TripComparison
+from app.models import TripPlan, Trip,Truck, Driver,TruckStats, TripComparison, StopEvent, StopEventType
 from fastapi import Depends, HTTPException
-from database import get_db
-from models import Trip, LocationLog
-from database import SessionLocal
-from location_search import geocode_place
+from app.database import get_db
+from app.models import Trip, LocationLog
+from app.database import SessionLocal
+from app.location_search import geocode_place
 from pydantic import BaseModel
-from websocket_utils import broadcast_location_sync
+from app.websocket_utils import broadcast_location_sync
 
 
 router = APIRouter()
@@ -111,6 +111,29 @@ async def end_trip(request: Request):
         trip.status = "completed"
         trip.distance_km = round(actual_distance_km, 2)
 
+        fuel_consumed = data.get("fuel_consumed_litres")
+        fuel_consumed = float(data.get("fuel_consumed_litres")) if data.get("fuel_consumed_litres") else None
+        trip.fuel_consumed_litres = fuel_consumed if fuel_consumed else None
+
+        if fuel_consumed and actual_distance_km:
+            trip_efficiency = actual_distance_km / fuel_consumed 
+
+            truck = db.query(Truck).filter(Truck.vin == trip.vin).first()
+            if truck:
+                trips_with_fuel = db.query(Trip).filter(
+                    Trip.vin == trip.vin,
+                    Trip.status == "completed",
+                    Trip.fuel_consumed_litres.isnot(None)
+                ).all()
+
+                total_km = sum(t.distance_km for t in trips_with_fuel)
+                total_fuel = sum(t.fuel_consumed_litres for t in trips_with_fuel)
+
+                if total_fuel > 0:
+                    truck.fuel_efficiency_kmpl = round(total_km / total_fuel, 2)
+                    db.add(truck)
+
+
         duration_minutes = None
         if trip.start_time and trip.end_time:
             duration = trip.end_time - trip.start_time
@@ -178,6 +201,7 @@ async def end_trip(request: Request):
                 stats.average_distance_per_trip_km = stats.total_distance_km / stats.total_trips
                 stats.average_speed_kmph = stats.total_distance_km / (stats.total_duration_minutes / 60) if stats.total_duration_minutes > 0 else 0
                 stats.last_updated = datetime.utcnow()
+
 
         db.commit()
 
@@ -439,3 +463,108 @@ def driver_efficiency_leaderboard(db: Session = Depends(get_db)):
         })
 
     return leaderboard
+
+@router.get("/truck/efficiency/leaderboard")
+def truck_efficiency_leaderboard():
+    db = SessionLocal()
+    try:
+        trucks = db.query(Truck).filter(Truck.fuel_efficiency_kmpl.isnot(None)).order_by(Truck.fuel_efficiency_kmpl.desc()).all()
+        leaderboard = [
+            {
+                "vin": truck.vin,
+                "model": truck.model,
+                "efficiency_kmpl": truck.fuel_efficiency_kmpl
+            }
+            for truck in trucks
+        ]
+        return leaderboard
+    finally:
+        db.close()
+
+@router.post("/stop_event/start")
+async def create_stop_event(request: Request):
+    data = await request.json()
+    vin = data.get("vin")
+    event_type_str = data.get("event_type")
+    reason = data.get("reason", None)
+
+    db: Session = SessionLocal()
+
+    try:
+        try:
+            event_type = StopEventType(event_type_str.lower())
+        except ValueError:
+            return {"error": f"Invalid event_type. Must be one of: {[e.value for e in StopEventType]}"}
+
+        trip = db.query(Trip).filter(Trip.vin == vin, Trip.status == "active").first()
+        if not trip:
+            return {"error": "No active trip found for this vehicle."}
+
+        last_log = db.query(LocationLog).filter(LocationLog.vin == vin).order_by(LocationLog.timestamp.desc()).first()
+        if not last_log:
+            return {"error": "No recent location data found."}
+
+        location_point = from_shape(Point(last_log.longitude, last_log.latitude), srid=4326)
+
+        if event_type == StopEventType.OTHERS and not reason:
+            return {"error": "Reason is required for 'others' event type."}
+
+        stop_event = StopEvent(
+            trip_id=trip.trip_id,
+            vin=vin,
+            start_time=datetime.now(timezone.utc),
+            location=location_point,
+            event_type=event_type,
+            reason=reason
+        )
+
+        db.add(stop_event)
+        db.commit()
+
+        return {
+            "message": "Stop event created successfully.",
+            "trip_id": trip.trip_id,
+            "event_type": event_type.value,
+            "location": {
+                "latitude": last_log.latitude,
+                "longitude": last_log.longitude
+            }
+        }
+
+    finally:
+        db.close()
+
+@router.post("/stop_event/end")
+async def end_stop_event(request: Request):
+    data = await request.json()
+    vin = data.get("vin")
+
+    db: Session = SessionLocal()
+
+    try:
+        stop = db.query(StopEvent)\
+            .filter(StopEvent.vin == vin, StopEvent.end_time.is_(None))\
+            .order_by(StopEvent.start_time.desc())\
+            .first()
+
+        if not stop:
+            return {"error": "No active stop event found for this truck."}
+
+        now = datetime.now(timezone.utc)
+        stop.end_time = now
+        stop.duration = now - stop.start_time
+
+        db.commit()
+
+        return {
+            "message": "Stop event ended.",
+            "stop_id": stop.stop_id,
+            "trip_id": stop.trip_id,
+            "event_type": stop.event_type.value,
+            "start_time": stop.start_time.isoformat(),
+            "end_time": stop.end_time.isoformat(),
+            "duration_minutes": round(stop.duration.total_seconds() / 60, 2)
+        }
+
+    finally:
+        db.close()
